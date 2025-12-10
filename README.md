@@ -1,4 +1,4 @@
-[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+[![Supported Python versions: 3.9 - 3.11](https://img.shields.io/badge/Python-3.9_|_3.10_|_3.11-blue?logo=python&logoColor=f5f5f5)](https://www.python.org/ "Supported Python versions")
 [![Build Status](https://dev.azure.com/shotgun-ecosystem/ShotGrid%20Jira%20Bridge/_apis/build/status/shotgunEvents?branchName=master)](https://dev.azure.com/shotgun-ecosystem/ShotGrid%20Jira%20Bridge/_build/latest?definitionId=122&branchName=master)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Linting](https://img.shields.io/badge/PEP8%20by-Hound%20CI-a873d1.svg)](https://houndci.com)
