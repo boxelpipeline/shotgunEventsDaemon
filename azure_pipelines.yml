@@ -26,4 +26,4 @@ pr:
 
 # Launch into the build pipeline.
 jobs:
-- template: azure-pipelines/code-style-validation.yml
+- template: azure_pipelines/code-style-validation.yml
