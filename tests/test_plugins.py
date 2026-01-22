@@ -1,6 +1,7 @@
 """
 Unit tests for example plugins.
 """
+
 import sys
 import os
 import unittest
@@ -9,9 +10,7 @@ import logging
 
 # Add examplePlugins to path
 example_plugins_path = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "src",
-    "examplePlugins"
+    os.path.dirname(os.path.dirname(__file__)), "src", "examplePlugins"
 )
 sys.path.insert(0, example_plugins_path)
 
@@ -21,14 +20,14 @@ try:
 except ImportError:
     shotgun_api3 = None
     # Create a mock module
-    sys.modules['shotgun_api3'] = mock.MagicMock()
+    sys.modules["shotgun_api3"] = mock.MagicMock()
 
 # Mock pytz if not available
 try:
     import pytz
 except ImportError:
     pytz = None
-    sys.modules['pytz'] = mock.MagicMock()
+    sys.modules["pytz"] = mock.MagicMock()
 
 # Import plugins after path is set
 import datestamp
@@ -40,7 +39,7 @@ class TestDatestampPlugin(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.logger = logging.getLogger('test')
+        self.logger = logging.getLogger("test")
         self.logger.setLevel(logging.DEBUG)
 
     def test_is_valid_with_valid_args(self):
@@ -48,15 +47,11 @@ class TestDatestampPlugin(unittest.TestCase):
         # Mock Shotgun instance
         mock_sg = mock.MagicMock()
         mock_sg.schema_field_read.return_value = {
-            'sg_status_list': {
-                'data_type': {'value': 'status_list'},
-                'properties': {
-                    'valid_values': {'value': ['fin', 'ip', 'wtg']}
-                }
+            "sg_status_list": {
+                "data_type": {"value": "status_list"},
+                "properties": {"valid_values": {"value": ["fin", "ip", "wtg"]}},
             },
-            'sg_finaled_on': {
-                'data_type': {'value': 'date_time'}
-            }
+            "sg_finaled_on": {"data_type": {"value": "date_time"}},
         }
 
         args = {
@@ -120,11 +115,9 @@ class TestDatestampPlugin(unittest.TestCase):
         """Test check_entity_schema validates field exists."""
         mock_sg = mock.MagicMock()
         mock_sg.schema_field_read.return_value = {
-            'sg_status_list': {
-                'data_type': {'value': 'status_list'},
-                'properties': {
-                    'valid_values': {'value': ['fin', 'ip']}
-                }
+            "sg_status_list": {
+                "data_type": {"value": "status_list"},
+                "properties": {"valid_values": {"value": ["fin", "ip"]}},
             }
         }
 
@@ -134,7 +127,7 @@ class TestDatestampPlugin(unittest.TestCase):
             "Shot",
             "sg_status_list",
             ["status_list"],
-            values=["fin"]
+            values=["fin"],
         )
 
         self.assertTrue(result)
@@ -145,11 +138,7 @@ class TestDatestampPlugin(unittest.TestCase):
         mock_sg.schema_field_read.return_value = {}
 
         result = datestamp.check_entity_schema(
-            mock_sg,
-            self.logger,
-            "Shot",
-            "nonexistent_field",
-            ["status_list"]
+            mock_sg, self.logger, "Shot", "nonexistent_field", ["status_list"]
         )
 
         self.assertIsNone(result)
@@ -158,17 +147,11 @@ class TestDatestampPlugin(unittest.TestCase):
         """Test check_entity_schema returns None when field type is wrong."""
         mock_sg = mock.MagicMock()
         mock_sg.schema_field_read.return_value = {
-            'sg_status_list': {
-                'data_type': {'value': 'text'}  # Wrong type
-            }
+            "sg_status_list": {"data_type": {"value": "text"}}  # Wrong type
         }
 
         result = datestamp.check_entity_schema(
-            mock_sg,
-            self.logger,
-            "Shot",
-            "sg_status_list",
-            ["status_list"]
+            mock_sg, self.logger, "Shot", "sg_status_list", ["status_list"]
         )
 
         self.assertIsNone(result)
@@ -177,11 +160,9 @@ class TestDatestampPlugin(unittest.TestCase):
         """Test check_entity_schema returns None when value is invalid."""
         mock_sg = mock.MagicMock()
         mock_sg.schema_field_read.return_value = {
-            'sg_status_list': {
-                'data_type': {'value': 'status_list'},
-                'properties': {
-                    'valid_values': {'value': ['fin', 'ip']}
-                }
+            "sg_status_list": {
+                "data_type": {"value": "status_list"},
+                "properties": {"valid_values": {"value": ["fin", "ip"]}},
             }
         }
 
@@ -191,7 +172,7 @@ class TestDatestampPlugin(unittest.TestCase):
             "Shot",
             "sg_status_list",
             ["status_list"],
-            values=["invalid_status"]  # Not in valid values
+            values=["invalid_status"],  # Not in valid values
         )
 
         self.assertIsNone(result)
@@ -202,7 +183,7 @@ class TestLogArgsPlugin(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.logger = logging.getLogger('test')
+        self.logger = logging.getLogger("test")
         self.logger.setLevel(logging.DEBUG)
         # Create a string handler to capture log output
         self.log_handler = logging.StreamHandler()
@@ -212,12 +193,12 @@ class TestLogArgsPlugin(unittest.TestCase):
         """Test that logArgs function logs the event."""
         mock_sg = mock.MagicMock()
         test_event = {
-            'id': 12345,
-            'event_type': 'Shotgun_Task_Change',
-            'entity': {'type': 'Task', 'id': 100}
+            "id": 12345,
+            "event_type": "Shotgun_Task_Change",
+            "entity": {"type": "Task", "id": 100},
         }
 
-        with self.assertLogs(self.logger, level='INFO') as cm:
+        with self.assertLogs(self.logger, level="INFO") as cm:
             logArgs.logArgs(mock_sg, self.logger, test_event, None)
 
         # Verify something was logged
@@ -226,5 +207,5 @@ class TestLogArgsPlugin(unittest.TestCase):
         self.assertIn("12345", cm.output[0])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

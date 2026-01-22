@@ -1,6 +1,7 @@
 """
 Pytest configuration file for shotgunEvents tests.
 """
+
 import os
 import sys
 

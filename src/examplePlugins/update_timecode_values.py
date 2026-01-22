@@ -337,7 +337,7 @@ def frame_from_timecode(timecode, fps=24.0):
     if not timecode or ":" not in timecode or ";" in timecode:
         return 0
 
-    (hour, minute, second, frame) = timecode.split(":")
+    hour, minute, second, frame = timecode.split(":")
     hours = int(hour)
     minutes = int(minute)
     seconds = int(second)
