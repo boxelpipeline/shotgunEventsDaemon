@@ -205,7 +205,3 @@ class TestLogArgsPlugin(unittest.TestCase):
         self.assertTrue(len(cm.output) > 0)
         # Verify the event data is in the log
         self.assertIn("12345", cm.output[0])
-
-
-if __name__ == "__main__":
-    unittest.main()

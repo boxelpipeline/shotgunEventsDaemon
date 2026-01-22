@@ -87,6 +87,7 @@ class TestDaemon(unittest.TestCase):
     @mock.patch("os.umask")
     @mock.patch("os.dup2")
     @mock.patch("builtins.open", new_callable=mock.mock_open)
+    @unittest.skipIf(os.name == "nt", "Skipping Unix-specific test on Windows")
     def test_daemonize_double_fork(
         self,
         mock_open_func,
@@ -190,7 +191,3 @@ class TestDaemon(unittest.TestCase):
         daemon = MinimalDaemon(self.service_name, self.pidfile)
         with self.assertRaises(NotImplementedError):
             daemon._cleanup()
-
-
-if __name__ == "__main__":
-    unittest.main()

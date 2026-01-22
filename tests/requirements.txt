@@ -5,6 +5,4 @@
 # this software in either electronic or hard copy form.
 
 pytest
-pytest-cov
 pytest-mock
-pytest-nunit
