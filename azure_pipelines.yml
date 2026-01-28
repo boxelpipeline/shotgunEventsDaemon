@@ -33,12 +33,8 @@ pr:
     include:
     - "*"
 
-# This pulls in a variable group from Azure. Variables can be encrypted or not.
-variables:
-- group: deploy-secrets
-
 # Launch into the build pipeline.
 jobs:
 - template: build-pipeline.yml@templates
   parameters:
-    has_unit_tests: false
+    has_unit_tests: true
