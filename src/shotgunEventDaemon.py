@@ -50,7 +50,6 @@ from shotgun_api3.lib.sgtimezone import SgTimezone
 
 import importlib_wrapper
 
-
 SG_TIMEZONE = SgTimezone()
 
 EMAIL_FORMAT_STRING = """Time: %(asctime)s

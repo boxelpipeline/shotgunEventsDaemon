@@ -9,7 +9,6 @@ import signal
 import sys
 import time
 
-
 if hasattr(os, "devnull"):
     DEVNULL = os.devnull
 else:
