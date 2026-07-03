@@ -38,6 +38,23 @@ import traceback
 import configparser
 import pickle
 
+#
+# BOXEL Customizations
+#
+print("Boxel adding third party modules")
+packages = r"/srv/shotgunEvents-master/src/site-packages/slack_sdk"
+packages = r"/srv/shotgunEvents-master/src/site-packages"
+if packages not in sys.path:
+    sys.path.append(packages)
+
+print("Boxel adding triggers modules")
+sys.path.append(r"/srv/shotgunEvents-master/src/bxl_triggers")
+
+# Boxel modules
+from bxl_triggers.common import slack_msj
+
+from distutils.version import StrictVersion
+
 if sys.platform == "win32":
     import win32serviceutil
     import win32service
@@ -360,9 +377,13 @@ class Engine(object):
             self._mainLoop()
         except KeyboardInterrupt:
             self.log.warning("Keyboard interrupt. Cleaning up...")
+            slack_msj.send_slack_message("Daemon stopped by user.")
         except Exception as err:
             msg = "Crash!!!!! Unexpected error (%s) in main loop.\n\n%s"
             self.log.critical(msg, type(err), traceback.format_exc())
+            
+            slack_msj.send_slack_message(
+                msg % (type(err), traceback.format_exc()))
 
     def _loadEventIdData(self):
         """
@@ -378,6 +399,7 @@ class Engine(object):
         if eventIdFile and os.path.exists(eventIdFile):
             try:
                 fh = open(eventIdFile, "rb")
+                print(eventIdFile)
                 try:
                     self._eventIdData = pickle.load(fh)
 
@@ -1327,8 +1349,13 @@ def main():
         return 0
 
     if action:
+        try:
+            slack_msj.send_slack_message(
+                "Executing shotgunEventDaemon action: {}".format(action))
+        except Exception as e:
+            pass  # Ignore Slack errors
+        
         daemon = LinuxDaemon()
-
         # Find the function to call on the daemon and call it
         func = getattr(daemon, action, None)
         if action[:1] != "_" and func is not None:

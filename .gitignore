@@ -2,3 +2,9 @@ docs/_build/doctrees
 shotgunEventDaemon.conf
 *.pyc
 .idea
+
+*BoxelFPT.json*
+*src/it_plugins/*
+*src/itlib/*
+*src/logs/*
+*src/site-packages/*
