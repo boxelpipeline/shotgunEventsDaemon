@@ -384,7 +384,7 @@ class Engine(object):
             self._mainLoop()
         except KeyboardInterrupt:
             self.log.warning("Keyboard interrupt. Cleaning up...")
-            slack_msj.send_slack_message("Daemon stopped by user.")
+            slack_msj.send_slack_message("Boxel site: Daemon stopped by user.")
         except Exception as err:
             msg = "Crash!!!!! Unexpected error (%s) in main loop.\n\n%s"
             self.log.critical(msg, type(err), traceback.format_exc())
@@ -1362,7 +1362,7 @@ def main():
     if action:
         try:
             slack_msj.send_slack_message(
-                "Executing shotgunEventDaemon action: {}".format(action))
+                "Boxel Server: Executing shotgunEventDaemon action: {}".format(action))
         except Exception as e:
             pass  # Ignore Slack errors
         
