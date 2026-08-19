@@ -3,16 +3,38 @@
 # Taken and modified from:
 # http://www.jejik.com/articles/2007/02/a_simple_unix_linux_daemon_in_python/
 
+from __future__ import print_function
 import atexit
+import importlib
 import os
 import signal
 import sys
 import time
+import traceback
+
 
 if hasattr(os, "devnull"):
     DEVNULL = os.devnull
 else:
     DEVNULL = "/dev/null"
+
+
+def _notify_slack_failure(context, detail):
+    """Best-effort Slack notification for daemonizer failures."""
+    try:
+        slack_msj = importlib.import_module("bxl_triggers.common.slack_msj")
+
+        msg = (
+            "Boxel: daemonizer failure\n"
+            "context={0}\n"
+            "detail={1}\n"
+            "cwd={2}\n"
+            "argv={3}"
+        ).format(context, detail, os.getcwd(), sys.argv)
+        slack_msj.send_slack_message(msg)
+    except Exception:
+        # Never block daemon operations on Slack diagnostics.
+        pass
 
 
 class Daemon(object):
@@ -25,7 +47,7 @@ class Daemon(object):
     def __init__(
         self, serviceName, pidfile, stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL
     ):
-        super().__init__()
+        super(Daemon, self).__init__()
 
         self._serviceName = serviceName
         self._stdin = stdin
@@ -47,6 +69,7 @@ class Daemon(object):
                 sys.exit(0)
         except OSError as e:
             sys.stderr.write("fork #1 failed: %d (%s)\n" % (e.errno, e.strerror))
+            _notify_slack_failure("fork_1", traceback.format_exc())
             sys.exit(1)
 
         # decouple from parent environment
@@ -62,6 +85,7 @@ class Daemon(object):
                 sys.exit(0)
         except OSError as e:
             sys.stderr.write("fork #2 failed: %d (%s)\n" % (e.errno, e.strerror))
+            _notify_slack_failure("fork_2", traceback.format_exc())
             sys.exit(1)
 
         # redirect standard file descriptors.
@@ -82,7 +106,16 @@ class Daemon(object):
         with open(self._pidfile, "w+") as f:
             f.write("%s\n" % pid)
         if os.path.exists("/var/lock/subsys"):
-            with open(os.path.join("/var/lock/subsys", self._serviceName), "w") as f:
+            try:
+                with open(os.path.join("/var/lock/subsys", self._serviceName), "w") as f:
+                    pass
+            except PermissionError:
+                # Best-effort compatibility with systems where /var/lock/subsys
+                # is root-owned or not used by the service manager.
+                _notify_slack_failure(
+                    "subsys_lock_write",
+                    "Permission denied writing /var/lock/subsys marker",
+                )
                 pass
 
     def _delpid(self):
@@ -105,15 +138,30 @@ class Daemon(object):
                 pid = int(pf.read().strip())
         except IOError:
             pid = None
+        except ValueError:
+            _notify_slack_failure(
+                "pidfile_parse",
+                "Invalid PID value in pidfile %s" % self._pidfile,
+            )
+            pid = None
 
         if pid:
             message = "pidfile %s already exist. Daemon already running?\n"
             sys.stderr.write(message % self._pidfile)
+            _notify_slack_failure(
+                "pidfile_exists",
+                "Existing PID file detected at %s with pid=%s"
+                % (self._pidfile, pid),
+            )
             sys.exit(1)
 
         # Start the daemon
         if daemonize:
-            self._daemonize()
+            try:
+                self._daemonize()
+            except Exception:
+                _notify_slack_failure("daemonize", traceback.format_exc())
+                raise
 
         # Cleanup handling
         def termHandler(signum, frame):
@@ -153,6 +201,7 @@ class Daemon(object):
                     os.remove(self._pidfile)
             else:
                 print(str(err))
+                _notify_slack_failure("stop", str(err))
                 sys.exit(1)
 
     def foreground(self):
