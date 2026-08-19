@@ -23,8 +23,17 @@ folder or an html compiled version at:
 http://shotgunsoftware.github.com/shotgunEvents
 """
 
+from __future__ import print_function
+
 __version__ = "1.0"
 __version_info__ = (1, 0)
+
+# Suppress the deprecation warning about imp until we get around to replacing it
+import warnings
+
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    import imp
 
 import datetime
 import logging
@@ -42,7 +51,6 @@ import pickle
 # BOXEL Customizations
 #
 print("Boxel adding third party modules")
-packages = r"/srv/shotgunEvents-master/src/site-packages/slack_sdk"
 packages = r"/srv/shotgunEvents-master/src/site-packages"
 if packages not in sys.path:
     sys.path.append(packages)
@@ -65,7 +73,6 @@ import daemonizer
 import shotgun_api3 as sg
 from shotgun_api3.lib.sgtimezone import SgTimezone
 
-import importlib_wrapper
 
 SG_TIMEZONE = SgTimezone()
 
@@ -313,7 +320,7 @@ class Engine(object):
         else:
             self.timing_logger = None
 
-        super().__init__()
+        super(Engine, self).__init__()
 
     def setEmailsOnLogger(self, logger, emails):
         # Configure the logger for email output
@@ -399,7 +406,6 @@ class Engine(object):
         if eventIdFile and os.path.exists(eventIdFile):
             try:
                 fh = open(eventIdFile, "rb")
-                print(eventIdFile)
                 try:
                     self._eventIdData = pickle.load(fh)
 
@@ -613,9 +619,8 @@ class Engine(object):
                 if state:
                     try:
                         with open(eventIdFile, "wb") as fh:
-                            pickle.dump(
-                                self._eventIdData, fh, protocol=pickle.HIGHEST_PROTOCOL
-                            )
+                            # Use protocol 2 so it can also be loaded in Python 2
+                            pickle.dump(self._eventIdData, fh, protocol=2)
                     except OSError as err:
                         self.log.error(
                             "Can not write event id data to %s.\n\n%s",
@@ -848,7 +853,7 @@ class Plugin(object):
         self._active = True
 
         try:
-            plugin = importlib_wrapper.load_source(self._pluginName, self._path)
+            plugin = imp.load_source(self._pluginName, self._path)
         except:
             self._active = False
             self.logger.error(
@@ -1315,7 +1320,9 @@ class LinuxDaemon(daemonizer.Daemon):
 
     def __init__(self):
         self._engine = Engine(_getConfigPath())
-        super().__init__("shotgunEvent", self._engine.config.getEnginePIDFile())
+        super(LinuxDaemon, self).__init__(
+            "shotgunEvent", self._engine.config.getEnginePIDFile()
+        )
 
     def start(self, daemonize=True):
         if not daemonize:
@@ -1326,7 +1333,7 @@ class LinuxDaemon(daemonizer.Daemon):
             )
             logging.getLogger().addHandler(handler)
 
-        super().start(daemonize)
+        super(LinuxDaemon, self).start(daemonize)
 
     def _run(self):
         """
@@ -1340,6 +1347,10 @@ class LinuxDaemon(daemonizer.Daemon):
 
 def main():
     """ """
+    if sys.version_info[0] == 2:
+        print("Python 2 is not supported anymore. Please use Python 3.")
+        return 3
+
     action = None
     if len(sys.argv) > 1:
         action = sys.argv[1]
