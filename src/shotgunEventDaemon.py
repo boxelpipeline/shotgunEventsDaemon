@@ -28,6 +28,7 @@ __version_info__ = (1, 0)
 
 import concurrent.futures
 import datetime
+import threading
 import logging
 import logging.handlers
 import os
@@ -389,13 +390,27 @@ class Engine(object):
             self._mainLoop()
         except KeyboardInterrupt:
             self.log.warning("Keyboard interrupt. Cleaning up...")
-            slack_msj.send_slack_message("Boxel site: Daemon stopped by user.")
+            # Fire-and-forget: a blocking send_slack_message() call
+            # here would hold up shutdown itself if Slack (or the
+            # network) is slow to respond, forcing a second Ctrl+C to
+            # actually kill the process instead of exiting cleanly -
+            # observed directly once already (the traceback showed
+            # this call still stuck in sock.connect() when the second
+            # KeyboardInterrupt landed).
+            threading.Thread(
+                target=slack_msj.send_slack_message,
+                args=("Boxel site: Daemon stopped by user.",),
+                daemon=True,
+            ).start()
         except Exception as err:
             msg = "Crash!!!!! Unexpected error (%s) in main loop.\n\n%s"
             self.log.critical(msg, type(err), traceback.format_exc())
-            
-            slack_msj.send_slack_message(
-                msg % (type(err), traceback.format_exc()))
+
+            threading.Thread(
+                target=slack_msj.send_slack_message,
+                args=(msg % (type(err), traceback.format_exc()),),
+                daemon=True,
+            ).start()
 
     def _loadEventIdData(self):
         """
