@@ -181,6 +181,16 @@ class Daemon(object):
             self._delpid()
 
         signal.signal(signal.SIGTERM, termHandler)
+        # Ctrl+C (SIGINT) previously had no handler here at all, so it
+        # fell back to Python's default behavior - raising
+        # KeyboardInterrupt wherever the main thread happened to be -
+        # a completely separate, untested path from the one SIGTERM
+        # already uses. Routing it through the same termHandler makes
+        # Ctrl+C behave exactly like `stop()`'s SIGTERM: same
+        # reentrancy guard above, same graceful shutdown via
+        # _delpid()/_cleanup(), for both this daemon and supervisor.py
+        # (which subclasses this same Daemon class).
+        signal.signal(signal.SIGINT, termHandler)
         atexit.register(self._delpid)
 
         # Run the daemon
