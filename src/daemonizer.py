@@ -5,6 +5,7 @@
 
 from __future__ import print_function
 import atexit
+import errno
 import importlib
 import os
 import signal
@@ -119,6 +120,24 @@ class Daemon(object):
                 )
                 pass
 
+    def _pid_is_running(self, pid):
+        """Return whether a process with this pid is currently alive.
+
+        Signal 0 performs the kernel's existence/permission checks for
+        a pid without actually delivering a signal - the standard way
+        to probe for a live process. Used by start() to tell a stale
+        pidfile (process crashed/killed without reaching _delpid()) from
+        one that still belongs to a running daemon.
+        """
+        try:
+            os.kill(pid, 0)
+        except OSError as err:
+            if err.errno == errno.ESRCH:
+                return False
+            if err.errno != errno.EPERM:
+                raise
+        return True
+
     def _delpid(self):
         if os.path.exists(self._pidfile):
             os.remove(self._pidfile)
@@ -147,14 +166,31 @@ class Daemon(object):
             pid = None
 
         if pid:
-            message = "pidfile %s already exist. Daemon already running?\n"
-            sys.stderr.write(message % self._pidfile)
+            # A pidfile alone doesn't mean the daemon is actually
+            # running: if the previous process crashed, was killed, or
+            # the machine restarted without going through
+            # stop()/_delpid(), the pidfile is left behind stale - and
+            # every subsequent start() would keep failing here forever
+            # even though nothing is actually running. Confirm the pid
+            # is still alive before treating this as "already running".
+            if self._pid_is_running(pid):
+                message = "pidfile %s already exist. Daemon already running?\n"
+                sys.stderr.write(message % self._pidfile)
+                _notify_slack_failure(
+                    "pidfile_exists",
+                    "Existing PID file detected at %s with pid=%s"
+                    % (self._pidfile, pid),
+                )
+                sys.exit(1)
+
+            message = "pidfile %s has stale pid=%s (process not running). Removing and continuing.\n"
+            sys.stderr.write(message % (self._pidfile, pid))
             _notify_slack_failure(
-                "pidfile_exists",
-                "Existing PID file detected at %s with pid=%s"
-                % (self._pidfile, pid),
+                "pidfile_stale",
+                "Stale PID file at %s with pid=%s (process not running); "
+                "removed it and continued start." % (self._pidfile, pid),
             )
-            sys.exit(1)
+            os.remove(self._pidfile)
 
         # Start the daemon
         if daemonize:
