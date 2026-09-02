@@ -55,6 +55,7 @@ class Daemon(object):
         self._stdout = stdout
         self._stderr = stderr
         self._pidfile = pidfile
+        self._shutting_down = False
 
     def _daemonize(self):
         """
@@ -165,6 +166,18 @@ class Daemon(object):
 
         # Cleanup handling
         def termHandler(signum, frame):
+            # stop() sends SIGTERM repeatedly (every 0.1s) until this
+            # process actually exits, so more signals keep arriving
+            # while _delpid()/_cleanup() (which waits on the plugin
+            # executors to drain) is still running. Without this guard,
+            # each repeat re-enters this handler on top of the one
+            # already in progress instead of replacing it, and stacks
+            # up recursively until Python's recursion limit crashes the
+            # process. Same fix already applied to supervisor.py's own
+            # stop handling for the identical reason.
+            if self._shutting_down:
+                return
+            self._shutting_down = True
             self._delpid()
 
         signal.signal(signal.SIGTERM, termHandler)
