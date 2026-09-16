@@ -66,6 +66,7 @@ if sys.platform == "win32":
     import servicemanager
 
 import daemonizer
+import db_logger
 import shotgun_api3 as sg
 from shotgun_api3.lib.sgtimezone import SgTimezone
 
@@ -277,6 +278,13 @@ class Config(configparser.ConfigParser):
 
         return self.getLogFile() + ".timing"
 
+    def getDatabaseLogEnabled(self):
+        if not self.has_section("database_log"):
+            return False
+        if not self.has_option("database_log", "enabled"):
+            return False
+        return self.getboolean("database_log", "enabled")
+
 
 class Engine(object):
     """
@@ -287,6 +295,7 @@ class Engine(object):
         """ """
         self._continue = True
         self._eventIdData = {}
+        self.db_logger = None
 
         # Populated once at startup by _loadDisabledEventLogScriptIds()
         # (called from run(), after self._sg below exists) - empty here
@@ -340,6 +349,19 @@ class Engine(object):
             _setFilePathOnLogger(self.timing_logger, timing_log_filename)
         else:
             self.timing_logger = None
+
+        # Database logging is additive: file logging above is left unchanged.
+        self.db_logger = None
+        if self.config.getDatabaseLogEnabled():
+            try:
+                self.db_logger = db_logger.DatabaseLogger(self.config, self.log)
+                self.db_logger.start()
+            except Exception:
+                self.log.error(
+                    "Failed to start database logging; continuing with file logging only.\n\n%s",
+                    traceback.format_exc(),
+                )
+                self.db_logger = None
 
         super().__init__()
 
@@ -746,6 +768,10 @@ class Engine(object):
         self._continue = False
         for collection in self._pluginCollections:
             collection.shutdown()
+
+        if self.db_logger is not None:
+            self.db_logger.shutdown()
+            self.db_logger = None
 
         # collection.shutdown() blocks until every plugin's queue is fully
         # drained (see PluginCollection.shutdown()/Plugin.shutdown()), so
@@ -1231,6 +1257,16 @@ class Plugin(object):
                 self.logger, self._engine.config.getLogFile("plugin." + self.getName())
             )
 
+        self._db_event_log = False
+        self._last_run_invoked = False
+        self._last_run_had_error = False
+
+        # Capture this plugin's log output (and callback child loggers) for
+        # the database event log. File handlers already attached above are unchanged.
+        self._db_output_handler = None
+        if self._engine.db_logger is not None:
+            self._db_output_handler = self._engine.db_logger.attach_capture(self.logger)
+
     def getName(self):
         return self._pluginName
 
@@ -1412,6 +1448,20 @@ class Plugin(object):
         """
         self._engine.setEmailsOnLogger(self.logger, emails)
 
+    def enableDatabaseEventLog(self, enabled=True):
+        """
+        Record this plugin's per-event output in the database event log.
+
+        Errors are always stored, for every plugin. Call this from
+        C{registerCallbacks} to also store successful runs and their logger
+        output. Default is off.
+
+        @param enabled: True to persist per-event output, False to keep only
+            errors (and per-minute stats).
+        @type enabled: I{bool}
+        """
+        self._db_event_log = bool(enabled)
+
     def load(self):
         """
         Load/Reload the plugin and all its callbacks.
@@ -1449,6 +1499,7 @@ class Plugin(object):
             self._mtime = mtime
             self._callbacks = []
             self._active = True
+            self._db_event_log = False
 
             try:
                 plugin = importlib_wrapper.load_source(self._pluginName, self._path)
@@ -1510,20 +1561,60 @@ class Plugin(object):
         )
 
     def process(self, event):
-        with self._lock:
-            if event["id"] in self._backlog:
-                if self._process(event):
-                    self.logger.info("Processed id %d from backlog." % event["id"])
-                    del self._backlog[event["id"]]
-                    self._updateLastEventId(event)
-            elif self._lastEventId is not None and event["id"] <= self._lastEventId:
-                msg = "Event %d is too old. Last event processed was (%d)."
-                self.logger.debug(msg, event["id"], self._lastEventId)
-            else:
-                if self._process(event):
-                    self._updateLastEventId(event)
+        db_logger_obj = self._engine.db_logger
+        started_at = None
+        self._last_run_invoked = False
+        self._last_run_had_error = False
+        if db_logger_obj is not None:
+            started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+                tzinfo=None
+            )
+            if self._db_output_handler is not None:
+                if self._db_event_log:
+                    self._db_output_handler.setLevel(logging.NOTSET)
+                else:
+                    self._db_output_handler.setLevel(logging.ERROR)
+                self._db_output_handler.begin()
 
-            return self._active
+        try:
+            with self._lock:
+                if event["id"] in self._backlog:
+                    if self._process(event):
+                        self.logger.info("Processed id %d from backlog." % event["id"])
+                        del self._backlog[event["id"]]
+                        self._updateLastEventId(event)
+                elif self._lastEventId is not None and event["id"] <= self._lastEventId:
+                    msg = "Event %d is too old. Last event processed was (%d)."
+                    self.logger.debug(msg, event["id"], self._lastEventId)
+                else:
+                    if self._process(event):
+                        self._updateLastEventId(event)
+
+                return self._active
+        finally:
+            output = None
+            if self._db_output_handler is not None:
+                output = self._db_output_handler.finish()
+            if db_logger_obj is not None and (
+                self._last_run_invoked or self._last_run_had_error
+            ):
+                completed_at = datetime.datetime.now(datetime.timezone.utc).replace(
+                    tzinfo=None
+                )
+                duration_us = int(
+                    (completed_at - started_at).total_seconds() * 1_000_000
+                )
+                had_error = self._last_run_had_error
+                db_logger_obj.log_plugin_run(
+                    event["id"],
+                    self.getName(),
+                    started_at,
+                    duration_us,
+                    completed_at,
+                    output,
+                    had_error=had_error,
+                    event_log=self._db_event_log or had_error,
+                )
 
     def _process(self, event):
         with self._lock:
@@ -1537,24 +1628,35 @@ class Plugin(object):
                 # callbacks matched. That keeps this plugin's cursor/
                 # backlog bookkeeping advancing normally instead of
                 # treating a whole burst of these as a gap to retry.
+                # self._last_run_invoked/_last_run_had_error stay at the
+                # False the caller (process(), above) just reset them
+                # to, so the database logger correctly records nothing
+                # for a suppressed event either.
                 msg = "Skipping event %d - suppressed sudo_as_login event."
                 self.logger.debug(msg, event["id"])
                 return self._active
 
+            invoked = False
+            had_error = False
             for callback in self:
                 if callback.isActive():
                     if callback.canProcess(event):
+                        invoked = True
                         msg = "Dispatching event %d to callback %s."
                         self.logger.debug(msg, event["id"], str(callback))
                         if not callback.process(event):
                             # A callback in the plugin failed. Deactivate the whole
                             # plugin.
+                            had_error = had_error or callback._had_error
                             self._active = False
                             break
+                        had_error = had_error or callback._had_error
                 else:
                     msg = "Skipping inactive callback %s in plugin."
                     self.logger.debug(msg, str(callback))
 
+            self._last_run_invoked = invoked
+            self._last_run_had_error = had_error
             return self._active
 
     def _updateLastEventId(self, event):
@@ -1636,7 +1738,12 @@ class Registrar(object):
         Wrap a plugin so it can be passed to a user.
         """
         self._plugin = plugin
-        self._allowed = ["logger", "setEmails", "registerCallback"]
+        self._allowed = [
+            "logger",
+            "setEmails",
+            "registerCallback",
+            "enableDatabaseEventLog",
+        ]
 
     def getLogger(self):
         """
@@ -1701,6 +1808,7 @@ class Callback(object):
         self._args = args
         self._stopOnError = stopOnError
         self._active = True
+        self._had_error = False
 
         # Find a name for this object
         if hasattr(callback, "__name__"):
@@ -1766,6 +1874,8 @@ class Callback(object):
         if self._engine._use_session_uuid:
             self._shotgun.set_session_uuid(event["session_uuid"])
 
+        self._had_error = False
+
         if self._engine.timing_logger:
             start_time = datetime.datetime.now(SG_TIMEZONE.local)
 
@@ -1807,6 +1917,7 @@ class Callback(object):
             ]
             self._engine.timing_logger.info(msg_format, *data)
 
+        self._had_error = error
         return self._active
 
     def _prettyTimeDeltaFormat(self, time_delta):
