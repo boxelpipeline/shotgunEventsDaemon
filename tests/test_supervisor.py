@@ -116,18 +116,63 @@ class TestSupervisorDaemon(unittest.TestCase):
             instance._confirm_daemon_started()
         mock_kill.assert_called_with(999, 0)
 
+    @mock.patch("time.sleep")
     @mock.patch("os.path.exists", return_value=False)
-    @mock.patch("subprocess.run")
-    def test_stop_child_via_cli(self, mock_run, mock_exists):
-        """`start`-mode stop shells out to the daemon's own `stop` action."""
+    @mock.patch("subprocess.Popen")
+    @mock.patch("supervisor._pid_is_alive")
+    @mock.patch("supervisor._read_pid_file")
+    def test_stop_child_via_cli(
+        self, mock_read_pid, mock_alive, mock_popen, mock_exists, mock_sleep
+    ):
+        """`start`-mode stop shells out to the daemon's own `stop` action
+        and blocks until the pid is confirmed gone - not just until the
+        helper subprocess returns."""
         instance = self._make_supervisor("start")
-        instance._stop_child()
+        mock_read_pid.return_value = 555
+        # Alive on the first poll, gone on the second - exercises the
+        # wait loop without looping forever.
+        mock_alive.side_effect = [True, False]
+        mock_helper = mock.Mock()
+        mock_popen.return_value = mock_helper
 
-        called_cmd = mock_run.call_args[0][0]
+        result = instance._stop_child()
+
+        self.assertTrue(result)
+        called_cmd = mock_popen.call_args[0][0]
         self.assertEqual(
             called_cmd,
             ["sudo", mock.ANY, supervisor.DAEMON_SCRIPT, "stop"],
         )
+        mock_helper.wait.assert_called_once()
+
+    @mock.patch("supervisor._read_pid_file", return_value=None)
+    @mock.patch("subprocess.Popen")
+    def test_stop_child_via_cli_no_pidfile_is_a_noop(
+        self, mock_popen, mock_read_pid
+    ):
+        """Nothing to stop if there's no pidfile to read a pid from."""
+        instance = self._make_supervisor("start")
+
+        result = instance._stop_child()
+
+        self.assertTrue(result)
+        mock_popen.assert_not_called()
+
+    @mock.patch("supervisor._read_pid_file", return_value=555)
+    @mock.patch("subprocess.Popen", side_effect=OSError("no sudo"))
+    def test_stop_child_via_cli_returns_false_if_stop_cannot_launch(
+        self, mock_popen, mock_read_pid
+    ):
+        """False only comes from being unable to even attempt the stop -
+        never from "waited long enough, giving up". _reload_child relies
+        on that distinction to decide whether launching a replacement is
+        safe.
+        """
+        instance = self._make_supervisor("start")
+
+        result = instance._stop_child()
+
+        self.assertFalse(result)
 
     def test_stop_child_via_process_handle_terminates_cleanly(self):
         """foreground-mode stop terminates the tracked process directly."""
@@ -143,45 +188,34 @@ class TestSupervisorDaemon(unittest.TestCase):
         mock_process.kill.assert_not_called()
         self.assertIsNone(instance._daemon_proc)
 
-    def test_stop_child_via_process_handle_gives_up_without_kill(self):
-        """A foreground daemon ignoring SIGTERM is left alone, not SIGKILLed.
+    def test_stop_child_via_process_handle_keeps_waiting_past_timeouts(self):
+        """A foreground daemon slow to react to SIGTERM is waited on, not
+        abandoned.
 
-        By design: no automatic escalation. If SIGTERM doesn't work within
-        the timeout, that's for a human to check on, not for the
-        supervisor to force closed.
+        By design: no automatic SIGKILL escalation, and no give-up point
+        either - launching a replacement while this one might still be
+        alive is exactly the two-daemons-racing bug this guards against.
+        The wait loop just keeps polling until the process actually
+        exits.
         """
         instance = self._make_supervisor("foreground")
         mock_process = mock.Mock()
         mock_process.poll.return_value = None
         mock_process.pid = 4242
-        mock_process.wait.side_effect = subprocess.TimeoutExpired(
-            cmd="daemon", timeout=1
-        )
+        mock_process.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="daemon", timeout=1),
+            subprocess.TimeoutExpired(cmd="daemon", timeout=1),
+            None,  # exits on the third poll
+        ]
         instance._daemon_proc = mock_process
 
-        instance._stop_child()
+        result = instance._stop_child()
 
+        self.assertTrue(result)
         mock_process.terminate.assert_called_once()
         mock_process.kill.assert_not_called()
-        self.assertEqual(mock_process.wait.call_count, 1)
-        # Left as-is (not cleared to None) since we don't actually know it
-        # stopped.
-        self.assertIs(instance._daemon_proc, mock_process)
-
-    @mock.patch("os.path.exists", return_value=True)
-    @mock.patch("subprocess.run")
-    def test_stop_child_via_cli_timeout_is_caught_not_raised(
-        self, mock_run, mock_exists
-    ):
-        """A `stop` that hangs past the timeout is reported, not retried
-        and not left to raise TimeoutExpired uncaught.
-        """
-        instance = self._make_supervisor("start")
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="stop", timeout=1)
-
-        instance._stop_child()  # must not raise
-
-        mock_run.assert_called_once()
+        self.assertEqual(mock_process.wait.call_count, 3)
+        self.assertIsNone(instance._daemon_proc)
 
     def test_stop_child_via_process_handle_already_exited(self):
         """Nothing to do if the tracked process already exited on its own."""
@@ -208,6 +242,20 @@ class TestSupervisorDaemon(unittest.TestCase):
             manager.mock_calls,
             [mock.call._stop_child(), mock.call._launch_child()],
         )
+
+    def test_reload_child_aborts_launch_when_stop_not_confirmed(self):
+        """If the previous daemon can't be confirmed stopped, do not
+        launch a replacement - two daemons racing over the same
+        eventIdFile is exactly the duplicate-processing bug this guards
+        against.
+        """
+        instance = self._make_supervisor("start")
+        instance._stop_child = mock.Mock(return_value=False)
+        instance._launch_child = mock.Mock()
+
+        instance._reload_child()
+
+        instance._launch_child.assert_not_called()
 
     def test_handle_reload_sets_flag(self):
         """SIGHUP marks a restart as requested; it does not act immediately."""

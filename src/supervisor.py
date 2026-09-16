@@ -28,17 +28,30 @@ DAEMON_PID_FILE = "/var/log/shotgunEventDaemon/shotgunEventDaemon.pid"
 SUPERVISOR_PID_FILE = "/var/log/shotgunEventDaemon/shotgunEventSupervisor.pid"
 SUPERVISOR_LOG_FILE = "/var/log/shotgunEventDaemon/shotgunEventSupervisor.log"
 
-# How long to wait for the daemon's own 'stop' to finish, or for a new
-# pidfile to appear after 'start', before giving up. Deliberately short:
-# if the daemon doesn't respond in this window, something needs a human
-# to look at it - the supervisor does not retry or escalate on its own,
-# it just reports what happened and stops.
-DAEMON_STOP_CONFIRM_TIMEOUT_SECONDS = 10
+# How often to check whether the daemon has actually stopped, and how
+# often to log a "still waiting" status line while doing so. Deliberately
+# no upper bound after which the supervisor gives up and launches a
+# replacement anyway: launching a new daemon while the old one might
+# still be alive is exactly how two processes end up racing over the
+# same eventIdFile, producing duplicate event processing. If a stop
+# genuinely never finishes, that needs a human to look at it - the
+# supervisor keeps logging that it's waiting, it does not paper over the
+# situation by starting a replacement.
+DAEMON_STOP_POLL_INTERVAL_SECONDS = 1
+DAEMON_STOP_LOG_INTERVAL_SECONDS = 10
+
+# How long to wait for a new pidfile to appear after 'start' before giving
+# up. Unlike the stop side above, giving up here is safe: no replacement
+# process is launched as a result, so there's nothing left racing against
+# anything - a human just needs to look at why 'start' didn't come up.
 DAEMON_START_CONFIRM_TIMEOUT_SECONDS = 15
 
-# How long to give a foreground-mode child to react to SIGTERM before
-# giving up (no SIGKILL escalation - see _stop_child_via_process_handle).
-FOREGROUND_TERMINATE_TIMEOUT_SECONDS = 10
+# Same reasoning as DAEMON_STOP_* above, for a foreground-mode child
+# (tracked via its Popen handle instead of a pidfile) - no give-up point
+# that would let a replacement be launched before this one is confirmed
+# gone.
+FOREGROUND_STOP_POLL_INTERVAL_SECONDS = 1
+FOREGROUND_STOP_LOG_INTERVAL_SECONDS = 10
 
 
 def _log(message: str) -> None:
@@ -176,78 +189,146 @@ class SupervisorDaemon(daemonizer.Daemon):
             f"{DAEMON_START_CONFIRM_TIMEOUT_SECONDS}s of launch."
         )
 
-    def _stop_child(self) -> None:
-        """Stop the daemon, using whichever mechanism its mode requires."""
-        if self.child_mode == "start":
-            self._stop_child_via_cli()
-        else:
-            self._stop_child_via_process_handle()
+    def _stop_child(self) -> bool:
+        """Stop the daemon, using whichever mechanism its mode requires.
 
-    def _stop_child_via_cli(self) -> None:
+        Returns:
+            bool: True once the daemon is confirmed fully stopped. False
+                only when there was nothing to even attempt waiting on
+                (e.g. the 'stop' command itself couldn't be launched) -
+                never as a result of "waited long enough, giving up".
+        """
+        if self.child_mode == "start":
+            return self._stop_child_via_cli()
+        return self._stop_child_via_process_handle()
+
+    def _stop_child_via_cli(self) -> bool:
         """Stop a `start`-mode daemon via its own pidfile-based `stop`.
 
-        No retry/escalation here by design: `stop` (in daemonizer.py,
-        unmodified) already retries SIGTERM in its own loop until the
-        process is confirmed dead. If it still hasn't finished within
-        DAEMON_STOP_CONFIRM_TIMEOUT_SECONDS, that's a sign something needs
-        a human to look at it, not something to paper over automatically -
-        log it clearly and stop, rather than adding another layer of
-        retrying on top of the one that already exists.
+        Blocks until the daemon's pid is actually confirmed gone from the
+        OS's perspective - there is no timeout after which this gives up
+        and reports success anyway. `daemon.py`'s own `_delpid()` removes
+        the pidfile *before* running `_cleanup()` (which drains every
+        plugin's queue and can take a while - see Engine.stop()), so the
+        pidfile disappearing is not proof the process has actually
+        exited; only `_pid_is_alive()` on the pid captured before 'stop'
+        was invoked is. Returning early on a slow stop is exactly what let
+        the supervisor launch a replacement while the old process was
+        still alive, producing two daemons racing over the same
+        eventIdFile - see _reload_child(), which refuses to launch
+        unless this returns True.
         """
-        _log("Stopping daemon via its own 'stop' command.")
+        pid = _read_pid_file(DAEMON_PID_FILE)
+        if pid is None:
+            _log("No daemon pidfile found; nothing to stop.")
+            return True
+
+        _log(f"Stopping daemon (pid {pid}) via its own 'stop' command.")
         try:
-            subprocess.run(
+            stop_helper = subprocess.Popen(
                 ["sudo", sys.executable, DAEMON_SCRIPT, "stop"],
-                timeout=DAEMON_STOP_CONFIRM_TIMEOUT_SECONDS,
-                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+        except OSError as exc:
+            _log(f"Could not launch daemon 'stop' command: {exc}")
+            return False
+
+        waited = 0
+        while _pid_is_alive(pid):
+            time.sleep(DAEMON_STOP_POLL_INTERVAL_SECONDS)
+            waited += DAEMON_STOP_POLL_INTERVAL_SECONDS
+            if waited % DAEMON_STOP_LOG_INTERVAL_SECONDS == 0:
+                _log(
+                    f"Still waiting for daemon (pid {pid}) to stop "
+                    f"({waited}s elapsed)..."
+                )
+
+        # The daemon pid is confirmed gone, so the helper's own SIGTERM
+        # loop (daemonizer.Daemon.stop(), unmodified) has already seen
+        # "No such process" and returned - this just reaps it instead of
+        # leaving it a zombie until the long-running supervisor process
+        # happens to exit. Best-effort only: a slow-to-exit sudo wrapper
+        # here is a zombie-cleanup nicety, not a reason to fail a stop
+        # that's already confirmed by the pid check above.
+        try:
+            stop_helper.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _log(
-                f"Daemon 'stop' did not finish within "
-                f"{DAEMON_STOP_CONFIRM_TIMEOUT_SECONDS}s. Not retrying - "
-                f"run 'sudo python3 {DAEMON_SCRIPT} stop' manually to "
-                f"check on it."
+                f"Note: the 'stop' helper process (pid {stop_helper.pid}) "
+                f"hasn't exited yet even though the daemon itself has - "
+                f"harmless, it will be reaped eventually."
             )
-            return
 
         if os.path.exists(DAEMON_PID_FILE):
             _log(
-                "Warning: daemon pidfile still present after 'stop' "
-                f"returned. Run 'sudo python3 {DAEMON_SCRIPT} stop' "
-                f"manually to check on it."
+                f"Warning: daemon pidfile still present even though pid "
+                f"{pid} has exited. Leaving it - check manually before "
+                f"the next start."
             )
         else:
-            _log("Daemon stop confirmed (pidfile gone).")
+            _log(f"Daemon stop confirmed (pid {pid} exited, pidfile gone).")
+        return True
 
-    def _stop_child_via_process_handle(self) -> None:
+    def _stop_child_via_process_handle(self) -> bool:
         """Stop a `foreground`-mode daemon directly - it has no pidfile.
 
-        No SIGKILL escalation by design: if SIGTERM doesn't work within
-        FOREGROUND_TERMINATE_TIMEOUT_SECONDS, that's worth a human
-        checking on rather than the supervisor forcing it closed.
+        Blocks until the tracked process is actually confirmed exited -
+        no timeout after which this gives up and reports success anyway
+        (see _stop_child_via_cli's docstring for why that matters). No
+        SIGKILL escalation either: a process that ignores SIGTERM this
+        long is worth a human looking at, not the supervisor forcing it
+        closed.
         """
         if self._daemon_proc is None or self._daemon_proc.poll() is not None:
             self._daemon_proc = None
-            return
+            return True
 
         _log("Stopping foreground daemon (SIGTERM to tracked process).")
         self._daemon_proc.terminate()
-        try:
-            self._daemon_proc.wait(timeout=FOREGROUND_TERMINATE_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            _log(
-                f"Daemon did not exit within "
-                f"{FOREGROUND_TERMINATE_TIMEOUT_SECONDS}s of SIGTERM. Not "
-                f"escalating - check on pid {self._daemon_proc.pid} "
-                f"manually."
-            )
-            return
+
+        waited = 0
+        while True:
+            try:
+                self._daemon_proc.wait(
+                    timeout=FOREGROUND_STOP_POLL_INTERVAL_SECONDS
+                )
+                break
+            except subprocess.TimeoutExpired:
+                waited += FOREGROUND_STOP_POLL_INTERVAL_SECONDS
+                if waited % FOREGROUND_STOP_LOG_INTERVAL_SECONDS == 0:
+                    _log(
+                        "Still waiting for foreground daemon (pid "
+                        f"{self._daemon_proc.pid}) to stop ({waited}s "
+                        "elapsed)..."
+                    )
+
+        _log(f"Foreground daemon (pid {self._daemon_proc.pid}) stop confirmed.")
         self._daemon_proc = None
+        return True
 
     def _reload_child(self) -> None:
-        """Stop and relaunch the daemon in its original mode."""
+        """Stop and relaunch the daemon in its original mode.
+
+        Never launches a replacement unless the previous process is
+        confirmed fully stopped first: two daemon processes racing over
+        the same eventIdFile is exactly the duplicate-event-processing
+        bug a rapid burst of autopull-triggered SIGHUPs exposed (each
+        successful reload re-signals on the next successful pull, so a
+        stop that silently "gave up" while the old process was still
+        draining its queues meant the new one started fetching from a
+        stale checkpoint while the old one was still finishing).
+        """
         _log("Reloading daemon.")
-        self._stop_child()
+        if not self._stop_child():
+            _log(
+                "Reload aborted: could not confirm the daemon fully "
+                "stopped. Not launching a replacement - two daemons "
+                "running at once is worse than one running old code a "
+                "bit longer. Investigate manually, then send SIGHUP "
+                "again once the old process is confirmed gone."
+            )
+            return
         self._launch_child()
         _log("Reload complete.")
 

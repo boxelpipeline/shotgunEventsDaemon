@@ -104,9 +104,7 @@ class Daemon(object):
         os.dup2(se.fileno(), sys.stderr.fileno())
 
         # write pidfile and subsys file
-        pid = str(os.getpid())
-        with open(self._pidfile, "w+") as f:
-            f.write("%s\n" % pid)
+        self._write_pidfile()
         if os.path.exists("/var/lock/subsys"):
             try:
                 with open(os.path.join("/var/lock/subsys", self._serviceName), "w") as f:
@@ -119,6 +117,11 @@ class Daemon(object):
                     "Permission denied writing /var/lock/subsys marker",
                 )
                 pass
+
+    def _write_pidfile(self):
+        pid = str(os.getpid())
+        with open(self._pidfile, "w+") as f:
+            f.write("%s\n" % pid)
 
     def _pid_is_running(self, pid):
         """Return whether a process with this pid is currently alive.
@@ -199,6 +202,14 @@ class Daemon(object):
             except Exception:
                 _notify_slack_failure("daemonize", traceback.format_exc())
                 raise
+        else:
+            # foreground mode skips _daemonize() entirely (no fork, no
+            # stdio redirect) - but still needs its own pidfile, or the
+            # stale-pid check above can never see it. Without this, two
+            # foreground runs (or a foreground run alongside a
+            # daemonized one) never detect each other and both end up
+            # live at once, racing to overwrite the same eventIdFile.
+            self._write_pidfile()
 
         # Cleanup handling
         def termHandler(signum, frame):
