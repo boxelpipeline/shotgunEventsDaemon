@@ -350,15 +350,22 @@ class Engine(object):
         else:
             self.timing_logger = None
 
-        # Database logging is additive: file logging above is left unchanged.
+        # Constructed here so plugins can attach capture handlers; started in
+        # Engine.start() after daemonize() so the writer thread survives fork.
+        # __init__ runs in the pre-fork parent process (LinuxDaemon.__init__
+        # constructs the Engine before daemonizer.Daemon.start() forks) -
+        # threads started here would not exist in the post-fork daemon
+        # process at all (fork only carries over the calling thread), so
+        # db_logger.start()'s writer/flush threads have to wait until
+        # start() below, which runs after the fork, inside the real daemon
+        # process.
         self.db_logger = None
         if self.config.getDatabaseLogEnabled():
             try:
                 self.db_logger = db_logger.DatabaseLogger(self.config, self.log)
-                self.db_logger.start()
             except Exception:
                 self.log.error(
-                    "Failed to start database logging; continuing with file logging only.\n\n%s",
+                    "Failed to configure database logging; continuing with file logging only.\n\n%s",
                     traceback.format_exc(),
                 )
                 self.db_logger = None
@@ -417,6 +424,20 @@ class Engine(object):
 
         # Notify which version of shotgun api we are using
         self.log.info("Using SG Python API version %s" % sg.__version__)
+
+        # Runs here (not Engine.__init__) so the writer/flush threads are
+        # created in the actual daemon process, after daemonize()'s fork -
+        # see the comment in __init__ for why starting them any earlier
+        # would silently lose them.
+        if self.db_logger is not None:
+            try:
+                self.db_logger.start()
+            except Exception:
+                self.log.error(
+                    "Failed to start database logging; continuing with file logging only.\n\n%s",
+                    traceback.format_exc(),
+                )
+                self.db_logger = None
 
         try:
             for collection in self._pluginCollections:
